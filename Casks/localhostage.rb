@@ -7,9 +7,11 @@ cask "localhostage" do
   desc "Menu bar app that shows which dev servers are holding your ports, and frees them"
   homepage "https://github.com/askmaddyy/localhostage"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "localhostage.app"
+
+  uninstall quit: "com.madhavoberoi.localhostage"
 
   zap trash: [
     "~/Library/Application Support/localhostage",
