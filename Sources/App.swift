@@ -11,11 +11,27 @@ struct LocalhostageApp: App {
             Panel().environment(store)
         } label: {
             let n = store.visible.count
-            Image(systemName: n == 0 ? "lock.open" : "lock.fill")
+            Image(nsImage: Self.scrap)
             if n > 0 { Text("\(n)") }
         }
         .menuBarExtraStyle(.window)
     }
+
+    /// Menu bar glyph: a tilted ransom-note scrap with ":" punched out. Template, so it follows the menu bar's tint.
+    static let scrap: NSImage = {
+        let img = NSImage(size: NSSize(width: 15, height: 16), flipped: false) { rect in
+            guard let cg = NSGraphicsContext.current?.cgContext else { return false }
+            cg.translateBy(x: rect.midX, y: rect.midY)
+            cg.rotate(by: -8 * .pi / 180)
+            cg.addPath(CGPath(roundedRect: CGRect(x: -5.5, y: -6.5, width: 11, height: 13), cornerWidth: 1.2, cornerHeight: 1.2, transform: nil))
+            cg.fillPath()
+            cg.setBlendMode(.destinationOut)
+            for y in [1.3, -3.7] { cg.fillEllipse(in: CGRect(x: -1.25, y: y, width: 2.5, height: 2.5)) }
+            return true
+        }
+        img.isTemplate = true
+        return img
+    }()
 }
 
 /// A server we've seen running, kept so it can be started again after it's freed.
