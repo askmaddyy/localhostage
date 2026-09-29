@@ -22,6 +22,8 @@ Built with SwiftUI and Liquid Glass on macOS 26, with a frosted fallback on macO
 
 Nothing leaves your Mac. To support Run, localhostage keeps each server's folder, command, and a short allowlist of environment variables (`PATH`, `HOME`, `NODE_ENV`, `PORT`...). It never stores secrets or API keys from your environment.
 
+macOS may ask once for access to Desktop, Documents, or Downloads. That access is only used to read each project's `.git/HEAD` for the branch label, and to start servers there when you press Run. If you decline, everything else still works.
+
 ## Why not the Mac App Store?
 
 App Store apps must be sandboxed, and the sandbox blocks reading other apps' sockets and stopping other processes, which is the whole app. That's why it ships through Homebrew, signed and notarized.

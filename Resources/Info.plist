@@ -13,6 +13,11 @@
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSUIElement</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+    <key>NSDesktopFolderUsageDescription</key><string>localhostage reads the .git folder of projects here to show which branch each dev server is on, and starts servers here when you press Run. Nothing leaves your Mac.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>localhostage reads the .git folder of projects here to show which branch each dev server is on, and starts servers here when you press Run. Nothing leaves your Mac.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>localhostage reads the .git folder of projects here to show which branch each dev server is on, and starts servers here when you press Run. Nothing leaves your Mac.</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>localhostage reads the .git folder of projects here to show which branch each dev server is on, and starts servers here when you press Run. Nothing leaves your Mac.</string>
+    <key>NSNetworkVolumesUsageDescription</key><string>localhostage reads the .git folder of projects here to show which branch each dev server is on, and starts servers here when you press Run. Nothing leaves your Mac.</string>
     <key>NSHumanReadableCopyright</key><string>MIT License. Free your ports.</string>
 </dict>
 </plist>
