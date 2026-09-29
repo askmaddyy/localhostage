@@ -119,6 +119,10 @@ private struct Header: View {
             }
             Menu {
                 Toggle("Show system servers", isOn: $store.showAll.animation(settle))
+                Picker("Auto-stop agent servers", selection: $store.autoStopHours) {
+                    Text("Off").tag(0.0)
+                    ForEach([1.0, 4.0, 12.0, 24.0], id: \.self) { h in Text("After \(Int(h)) hour\(h == 1 ? "" : "s")").tag(h) }
+                }
                 Toggle("Sounds", isOn: $store.sounds)
                 Toggle("Open at login", isOn: $store.openAtLogin)
                 Divider()
@@ -239,6 +243,10 @@ private struct LiveRow: View {
         if l.cpu >= 1 { parts.append("\(Int(l.cpu))% CPU") }
         if l.ports.count > 1 { parts.append("+" + l.ports.dropFirst().map(String.init).joined(separator: ", ")) }
         if let o = l.origin { parts.append("via \(o)") }
+        if l.agent != nil, store.autoStopHours > 0 {
+            let left = store.autoStopHours * 3600 - Date().timeIntervalSince(l.started)
+            parts.append(left > 60 ? "auto-stops in \(uptime(Date().addingTimeInterval(-left)))" : "auto-stopping")
+        }
         return parts.joined(separator: "  ·  ")
     }
 

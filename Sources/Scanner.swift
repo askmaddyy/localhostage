@@ -34,7 +34,7 @@ struct Launch: Codable, Hashable, Sendable {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")  // PATH lookup from `env` below, like the shell
         p.arguments = ["--"] + args
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        p.environment = env
+        p.environment = env.filter { !Proc.isAgentMarker($0.key) }  // you pressed Run: it's yours now, not the agent's
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: log.path, contents: Data("$ \(header)\n".utf8))
         let out = try FileHandle(forWritingTo: log)
@@ -62,6 +62,13 @@ struct Listener: Hashable, Sendable {
     let cpu: Double
     let isDev: Bool
     let launch: Launch?
+    /// The coding agent that started it (not one you typed in a terminal), e.g. "Claude Code". See `Proc.agent(of:)`.
+    let agent: String?
+
+    /// Auto-stop only ever touches servers an agent started, never protected ones, and only once they're old enough.
+    func dueForAutoStop(after age: TimeInterval, now: Date = Date()) -> Bool {
+        agent != nil && isDev && !isProtected && now.timeIntervalSince(started) >= age
+    }
 
     /// Skipped by Kill all; a single Kill asks "Sure?" first. System processes (only listed with "Show system servers") and data stores.
     var isProtected: Bool { !isDev || ["Postgres", "Redis", "MongoDB", "MySQL", "Docker"].contains(kind) }
@@ -70,7 +77,7 @@ struct Listener: Hashable, Sendable {
 
 /// Reads listening TCP sockets straight from libproc: no lsof, no subprocesses. A full scan is ~10ms.
 actor Scanner {
-    private struct Static { let start: Int; let args: [String]; let path: String; let cwd: String?; let origin: String?; let launcher: pid_t; let byApp: Bool; let launch: Launch? }
+    private struct Static { let start: Int; let args: [String]; let path: String; let cwd: String?; let origin: String?; let launcher: pid_t; let byApp: Bool; let agent: String?; let launch: Launch? }
     private var cache: [pid_t: Static] = [:]
     private var lastCPU: [pid_t: (ticks: UInt64, at: UInt64)] = [:]
 
@@ -94,7 +101,7 @@ actor Scanner {
                 let ours = byUser && !Proc.isGUIApp(launcher) && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
                 let launch = (Proc.cwd(launcher) ?? cwd).map { Launch(cwd: $0, args: largs, env: env) }.flatMap { ours && $0.isRunnable ? $0 : nil }
                 cache[pid] = Static(start: start, args: Proc.argsAndEnv(pid).args, path: Proc.path(pid), cwd: cwd,
-                                    origin: origin, launcher: launcher, byApp: !byUser, launch: launch)
+                                    origin: origin, launcher: launcher, byApp: !byUser, agent: Proc.agent(of: pid), launch: launch)
             }
             let s = cache[pid]!
             let name = Proc.name(pid)
@@ -118,7 +125,7 @@ actor Scanner {
                 memory: mem, cpu: cpu,
                 // an unrecognised process a GUI app started is that app's helper (Chrome extension hosts etc.)
                 isDev: Kinds.isDev(path: s.path, kind: kind, origin: s.origin) && (s.origin != nil || (!Proc.isApp(pid) && !(s.byApp && kind == "Process"))),
-                launch: s.launch))
+                launch: s.launch, agent: s.agent))
         }
         cache = cache.filter { seen.contains($0.key) }
         lastCPU = lastCPU.filter { seen.contains($0.key) }
@@ -329,6 +336,42 @@ enum Proc {
         return pp.contains(".app/") && !pp.contains(".framework/") && !pp.contains(".app/Contents/Developer/")
     }
 
+    /// Which coding agent started this server, if one did. You typed it (never auto-stopped) whenever an interactive
+    /// shell sits in its ancestry. Otherwise: an agent parent (`zsh -c` from Claude Code), or the agent's own marker
+    /// env var, which children inherit and which survives the agent exiting and the server being orphaned.
+    static func agent(of pid: pid_t) -> String? {
+        if isGUIApp(pid) { return nil }  // an app's own process (Claude Helper, the claude binary itself): never
+        var p = parent(pid)
+        for _ in 0..<16 {
+            guard let cur = p, cur > 1 else { break }
+            let n = name(cur).lowercased()
+            let args = argsAndEnv(cur).args
+            if shells.contains(n) {
+                let interactive = (args.first ?? "").hasPrefix("-") || !args.dropFirst().contains { !$0.hasPrefix("-") }
+                if interactive { return nil }
+            } else if isUs(cur) {
+                return nil  // started with Run
+            } else if let o = Kinds.originName(n, args: args), Kinds.agents.contains(o) {
+                return o
+            } else if isGUIApp(cur) || Kinds.originName(n, args: args) != nil {
+                break  // a terminal or app with no interactive shell below it: fall back to markers
+            }
+            p = parent(cur)
+        }
+        return agentMarker(argsAndEnv(pid).env)
+    }
+
+    /// Env vars coding agents set on everything they run (verified: Claude Code sets CLAUDECODE=1 and AI_AGENT).
+    static func isAgentMarker(_ key: String) -> Bool {
+        key == "CLAUDECODE" || key == "AI_AGENT" || key.hasPrefix("CLAUDE_CODE_")
+    }
+
+    static func agentMarker(_ env: [String: String]) -> String? {
+        if env["CLAUDECODE"] == "1" { return "Claude Code" }
+        guard let id = env["AI_AGENT"]?.split(separator: "_").first.map({ $0.lowercased() }), !id.isEmpty else { return nil }
+        return ["claude-code": "Claude Code", "codex": "Codex", "cursor": "Cursor", "conductor": "Conductor"][id] ?? id
+    }
+
     /// First recognisable app or agent up the parent chain.
     static func origin(of pid: pid_t) -> String? {
         var p = parent(pid)
@@ -380,6 +423,9 @@ enum Kinds {
         ("terminal", "Terminal"), ("wezterm", "WezTerm"), ("alacritty", "Alacritty"), ("kitty", "kitty"),
         ("localhostage", "localhostage"),
     ]
+
+    /// Origins that are coding agents (the rest are terminals and editors you type into).
+    static let agents: Set<String> = ["Claude Code", "Codex", "Conductor"]
 
     static func originName(_ lowerName: String, args: [String]) -> String? {
         let names = [lowerName] + args.prefix(2).map { ($0 as NSString).lastPathComponent.lowercased() }

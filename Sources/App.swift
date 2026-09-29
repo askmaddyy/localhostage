@@ -58,6 +58,10 @@ final class Store {
     var sounds = UserDefaults.standard.object(forKey: "sounds") as? Bool ?? true {
         didSet { UserDefaults.standard.set(sounds, forKey: "sounds") }
     }
+    /// Servers an agent started get stopped once they've run this many hours. 0 = off, the default.
+    var autoStopHours = UserDefaults.standard.double(forKey: "autoStopHours") {
+        didSet { UserDefaults.standard.set(autoStopHours, forKey: "autoStopHours") }
+    }
     var isOpen = false {
         didSet { if isOpen { Task { await refresh() } } }
     }
@@ -99,6 +103,14 @@ final class Store {
             withAnimation(.spring(duration: 0.4, bounce: 0)) { listeners = fresh }
         }
         remember(fresh)
+        if autoStopHours > 0 {
+            let due = fresh.filter { $0.dueForAutoStop(after: autoStopHours * 3600) && !dying.contains($0.pid) }
+            if !due.isEmpty {
+                let agents = Set(due.compactMap(\.agent))
+                let who = agents.count == 1 ? agents.first! : "your agents"
+                release(due, saying: "Freed \(due.count) server\(due.count == 1 ? "" : "s") \(who) forgot about.")
+            }
+        }
         for (key, since) in starting {
             let r = recents.first { $0.id == key }
             // up = the same launch is running, or its port is held by something running from its folder
@@ -133,7 +145,11 @@ final class Store {
     }
 
     func freeAll() {
-        let targets = freeable
+        release(freeable, saying: "Mass release. \(freeable.count) ports walk free.")
+    }
+
+    /// Kill all and auto-stop: stop every tree, move them to Recently stopped, one sound, one toast.
+    private func release(_ targets: [Listener], saying message: String) {
         targets.forEach { dying.insert($0.pid) }
         Task {
             await withTaskGroup(of: Void.self) { g in
@@ -145,7 +161,7 @@ final class Store {
                 listeners.removeAll { l in targets.contains { $0.pid == l.pid } }
                 dying.subtract(targets.map(\.pid))
             }
-            say("Mass release. \(targets.count) ports walk free.")
+            say(message)
             await refresh()
         }
     }

@@ -3,6 +3,9 @@
 import AppKit
 import Foundation
 setvbuf(stdout, nil, _IOLBF, 0)
+// This check itself may run inside an agent (it does when Claude Code runs it): drop the agent markers so every
+// server below is "typed by hand" unless a case adds a marker on purpose.
+for key in ProcessInfo.processInfo.environment.keys where Proc.isAgentMarker(key) { unsetenv(key) }
 // Register as a menu bar app, exactly like localhostage, so "started by us" is tested the way the real app sees it
 _ = NSApplication.shared
 NSApp.setActivationPolicy(.accessory)
@@ -16,22 +19,32 @@ let server = typeInTerminal("python3 -m http.server 48999", in: dir)
 
 /// Types `cmd` into an interactive zsh on a pseudo-terminal, the way a real terminal runs what you type.
 /// With `agent: true`, a process named like Claude Code runs it as `zsh -c "<cmd>"` instead, as agents do.
-func typeInTerminal(_ cmd: String, in dir: URL, agent: Bool = false) -> Process {
+/// With `agentTab: true`, you type it into an interactive shell that an agent-named app opened (a terminal tab in it).
+func typeInTerminal(_ cmd: String, in dir: URL, agent: Bool = false, agentTab: Bool = false) -> Process {
     let term = Process()
-    if agent {
+    if agent || agentTab {
         // a real binary named like Claude Code that runs `zsh -c <cmd>` and waits, as agents do
         let sim = dir.appendingPathComponent("claude-sim")
         if !FileManager.default.fileExists(atPath: sim.path) {
             try! """
             #include <unistd.h>
             #include <sys/wait.h>
-            int main(int c, char **v) { pid_t p = fork(); if (!p) { execl("/bin/zsh", "zsh", "-f", "-c", v[1], (char *)0); _exit(127); } int s; waitpid(p, &s, 0); return 0; }
+            #include <string.h>
+            int main(int c, char **v) {
+                pid_t p = fork();
+                if (!p) {
+                    if (!strcmp(v[1], "-i")) execl("/bin/zsh", "zsh", "-f", "-i", (char *)0);
+                    else execl("/bin/zsh", "zsh", "-f", "-c", v[1], (char *)0);
+                    _exit(127);
+                }
+                int s; waitpid(p, &s, 0); return 0;
+            }
             """
                 .write(to: dir.appendingPathComponent("sim.c"), atomically: true, encoding: .utf8)
             shell("cc -o claude-sim sim.c", in: dir)
         }
         term.executableURL = sim
-        term.arguments = [cmd]
+        term.arguments = agentTab ? ["-i"] : [cmd]
     } else {
         term.executableURL = URL(fileURLWithPath: "/usr/bin/script")
         term.arguments = ["-q", "/dev/null", "/bin/zsh", "-f", "-i"]
@@ -40,8 +53,9 @@ func typeInTerminal(_ cmd: String, in dir: URL, agent: Bool = false) -> Process 
     let input = Pipe()
     term.standardInput = input
     term.standardOutput = FileHandle.nullDevice
+    term.standardError = FileHandle.nullDevice
     try! term.run()
-    input.fileHandleForWriting.write(Data("\(cmd)\n".utf8))
+    if !agent || agentTab { input.fileHandleForWriting.write(Data("\(cmd)\n".utf8)) }
     return term
 }
 
@@ -156,6 +170,50 @@ Task {
     await roundTrip("cargo", dir: rust, typed: "cargo run -q", port: 48974, expect: "rustapp", tries: 100)
     await roundTrip("agent", dir: npmDir, typed: "npm run dev", port: 48997, expect: "npm run dev", agent: true)
     await roundTrip("ruby", dir: scripted, typed: "ruby -run -e httpd . -p 48973", port: 48973, expect: "ruby -run -e httpd . -p 48973")
+
+    // Auto-stop may only ever reap what an agent ran. Plain listener binary for the odd shapes below.
+    try! """
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <stdlib.h>
+    #include <unistd.h>
+    int main(int c, char **v) { int s = socket(AF_INET, SOCK_STREAM, 0), one = 1; setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); struct sockaddr_in a = {0}; a.sin_family = AF_INET; a.sin_port = htons(atoi(v[1])); bind(s, (struct sockaddr *)&a, sizeof a); listen(s, 8); pause(); }
+    """.write(to: dir.appendingPathComponent("listen.c"), atomically: true, encoding: .utf8)
+    shell("cc -o postgres listen.c && mkdir -p Fake.app/Contents/MacOS && cp postgres Fake.app/Contents/MacOS/helper", in: dir)
+    _ = typeInTerminal("true", in: dir, agent: true)  // builds claude-sim
+    var procs: [Process] = []
+    procs.append(typeInTerminal("python3 -m http.server 48960", in: dir, agent: true))              // agent ran it
+    procs.append(typeInTerminal("python3 -m http.server 48961", in: dir))                           // you typed it
+    procs.append(typeInTerminal("python3 -m http.server 48962", in: dir, agentTab: true))           // you typed it in an agent app's terminal tab
+    shell("CLAUDECODE=1 python3 -m http.server 48963 >/dev/null 2>&1 &", in: dir)                   // orphan, Claude Code gone
+    shell("AI_AGENT=codex_0-50_agent python3 -m http.server 48964 >/dev/null 2>&1 &", in: dir)      // orphan, Codex gone
+    shell("python3 -m http.server 48965 >/dev/null 2>&1 &", in: dir)                                // orphan, no marker
+    procs.append(typeInTerminal("CLAUDECODE=1 python3 -m http.server 48966", in: dir))              // typed, marker set by hand
+    procs.append(typeInTerminal("./postgres 48967", in: dir, agent: true))                          // agent started a database
+    procs.append(typeInTerminal("./Fake.app/Contents/MacOS/helper 48968", in: dir, agent: true))    // an app's own helper
+    let expected: [Int: String?] = [48960: "Claude Code", 48961: nil, 48962: nil, 48963: "Claude Code", 48964: "Codex",
+                                    48965: nil, 48966: nil, 48967: "Claude Code", 48968: nil]
+    for port in expected.keys.sorted() { _ = await find(port) }
+    let seen = await Scanner().scan()
+    for (port, want) in expected.sorted(by: { $0.key < $1.key }) {
+        guard let l = seen.first(where: { $0.ports.contains(port) }) else { fatalError("auto-stop: \(port) not listening") }
+        precondition(l.agent == want, "auto-stop: :\(port) agent \(String(describing: l.agent)), want \(String(describing: want))")
+        let reap = l.dueForAutoStop(after: 0)
+        let shouldReap = want != nil && port != 48967  // the database is protected even when an agent started it
+        precondition(reap == shouldReap, "auto-stop: :\(port) due=\(reap)")
+        precondition(!l.dueForAutoStop(after: 3600), "auto-stop: :\(port) reaped before its time")
+    }
+    print("  ok  auto-stop picks exactly the agent servers (3 of 9)")
+
+    // Run makes it yours: the relaunched server carries no agent markers and is never auto-stopped
+    let orphan = seen.first { $0.ports.contains(48963) }!
+    await Proc.killTree(orphan.launcher)
+    try! orphan.launch!.start(log: dir.appendingPathComponent("rerun.log"), header: orphan.command)
+    guard let back = await find(48963) else { fatalError("rerun didn't listen") }
+    precondition(back.agent == nil && Proc.argsAndEnv(back.pid).env["CLAUDECODE"] == nil, "Run kept the agent marker")
+    print("  ok  Run strips agent markers")
+    for p in expected.keys { if let l = (await Scanner().scan()).first(where: { $0.ports.contains(p) }) { await Proc.killTree(l.launcher) } }
+    procs.forEach { $0.terminate() }
 
     // a Run that dies immediately reports its exit code right away
     let exitCode = await withCheckedContinuation { c in
