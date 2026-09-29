@@ -15,8 +15,14 @@ struct Launch: Codable, Hashable, Sendable {
     /// Starts it detached, with stdout/stderr going to `log` (truncated each run).
     func start(log: URL, header: String) throws {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: exe)
-        p.arguments = Array(args.dropFirst())
+        // argv[0] names the binary we saw (or a shebang interpreter); a rewritten title like `npm` is resolved via PATH
+        if (args[0] as NSString).lastPathComponent == (exe as NSString).lastPathComponent {
+            p.executableURL = URL(fileURLWithPath: exe)
+            p.arguments = Array(args.dropFirst())
+        } else {
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            p.arguments = args
+        }
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
         var env = env
         if env["PATH"] == nil { env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
@@ -32,8 +38,7 @@ struct Launch: Codable, Hashable, Sendable {
     }
 }
 
-struct Listener: Identifiable, Hashable, Sendable {
-    var id: pid_t { pid }
+struct Listener: Hashable, Sendable {
     let pid: pid_t
     let launcher: pid_t
     let ports: [Int]
@@ -49,7 +54,8 @@ struct Listener: Identifiable, Hashable, Sendable {
     let isDev: Bool
     let launch: Launch?
 
-    var isProtected: Bool { ["Postgres", "Redis", "MongoDB", "MySQL", "Docker"].contains(kind) }
+    /// Skipped by Kill all; a single Kill asks "Sure?" first. System processes (only listed with "Show system servers") and data stores.
+    var isProtected: Bool { !isDev || ["Postgres", "Redis", "MongoDB", "MySQL", "Docker"].contains(kind) }
     var canRelaunch: Bool { isDev && !isProtected && launch != nil }
 }
 
@@ -74,9 +80,12 @@ actor Scanner {
                 let (largs, env) = Proc.argsAndEnv(launcher)
                 let lcwd = Proc.cwd(launcher) ?? cwd
                 let exe = Proc.path(launcher)
-                let launch = (!byUser || largs.isEmpty || lcwd == nil || exe.isEmpty) ? nil : Launch(exe: exe, cwd: lcwd!, args: largs, env: env)
+                let origin = Proc.origin(of: pid)
+                // an orphan living inside an app bundle is that app's helper (updaters etc.), not something you ran
+                let ours = byUser && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
+                let launch = (!ours || largs.isEmpty || lcwd == nil || exe.isEmpty) ? nil : Launch(exe: exe, cwd: lcwd!, args: largs, env: env)
                 cache[pid] = Static(start: start, args: Proc.argsAndEnv(pid).args, path: Proc.path(pid), cwd: cwd,
-                                    origin: Proc.origin(of: pid), launcher: launcher, launch: launch)
+                                    origin: origin, launcher: launcher, launch: launch)
             }
             let s = cache[pid]!
             let name = Proc.name(pid)
@@ -146,6 +155,10 @@ enum Proc {
 
     static func parent(_ pid: pid_t) -> pid_t? { bsdInfo(pid).map { pid_t($0.pbi_ppid) } }
 
+    /// Zombies (dead, not yet reaped by their parent - e.g. servers we started with Run) count as gone.
+    /// (libproc returns no info at all for a zombie.)
+    static func isAlive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 && (bsdInfo(pid).map { $0.pbi_status != UInt32(SZOMB) } ?? false) }
+
     private static func string(_ buf: [CChar]) -> String {
         String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
@@ -195,6 +208,9 @@ enum Proc {
         }
         var args: [String] = []
         while args.count < argc, i < size { args.append(next()) }
+        // node/npm overwrite argv with a title ("npm run dev", "", "", ...): split it back into words
+        while args.last == "" { args.removeLast() }
+        if args.count == 1, args[0].contains(" "), !args[0].contains("/") { args = args[0].split(separator: " ").map(String.init) }
         var env: [String: String] = [:]
         while i < size {
             let kv = next()
@@ -247,15 +263,23 @@ enum Proc {
         var cur = pid
         for _ in 0..<16 {
             guard let p = parent(cur), p > 1, bsdInfo(p)?.pbi_uid == getuid() else { break }
-            let n = name(p).lowercased()
-            let args = argsAndEnv(p).args
-            if shells.contains(n) || Kinds.originName(n, args: args) != nil { break }
-            // bundled runtimes like Xcode's Python.app live inside a .framework; any other .app is a GUI app
-            let pp = path(p)
-            if pp.contains(".app/"), !pp.contains(".framework/") { return (cur, false) }
+            if isGUIApp(p) { return (cur, false) }
+            if isAgent(p) { break }
+            // a shell under a terminal/agent/app is the user's; `sh -c` under npm/yarn/make is part of the job
+            if shells.contains(name(p).lowercased()) {
+                guard let gp = parent(p), gp > 1, !shells.contains(name(gp).lowercased()), !isAgent(gp), !isGUIApp(gp) else { break }
+            }
             cur = p
         }
         return (cur, true)
+    }
+
+    private static func isAgent(_ p: pid_t) -> Bool { Kinds.originName(name(p).lowercased(), args: argsAndEnv(p).args) != nil }
+
+    // bundled runtimes like Xcode's Python.app live inside a .framework; any other .app is a GUI app
+    private static func isGUIApp(_ p: pid_t) -> Bool {
+        let pp = path(p)
+        return pp.contains(".app/") && !pp.contains(".framework/")
     }
 
     /// First recognisable app or agent up the parent chain.
@@ -294,9 +318,11 @@ enum Proc {
         for p in targets { kill(p, SIGTERM) }
         for _ in 0..<20 {
             try? await Task.sleep(for: .milliseconds(100))
-            if targets.allSatisfy({ kill($0, 0) != 0 }) { return }
+            if !targets.contains(where: isAlive) { return }
         }
-        for p in targets where kill(p, 0) == 0 { kill(p, SIGKILL) }
+        for p in targets where isAlive(p) { kill(p, SIGKILL) }
+        // SIGKILL is async too: wait for the exit so the next scan sees the port free
+        for _ in 0..<10 where targets.contains(where: isAlive) { try? await Task.sleep(for: .milliseconds(50)) }
     }
 }
 

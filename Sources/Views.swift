@@ -114,13 +114,13 @@ private struct Header: View {
                 .buttonStyle(Press())
                 .glass(.red.opacity(0.55), interactive: true, in: Capsule())
                 .foregroundStyle(.white)
-                .help("Stop every server except databases and Docker")
+                .help("Stop every dev server (skips system processes, databases and Docker)")
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
             Menu {
                 Toggle("Show system servers", isOn: $store.showAll.animation(settle))
                 Toggle("Sounds", isOn: $store.sounds)
-                Toggle("Open at login", isOn: Binding(get: { store.launchAtLogin }, set: { _ in store.toggleLaunchAtLogin() }))
+                Toggle("Open at login", isOn: $store.openAtLogin)
                 Divider()
                 Button("Quit localhostage") { NSApp.terminate(nil) }.keyboardShortcut("q")
             } label: {
@@ -187,7 +187,7 @@ private struct LiveRow: View {
                         .font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit()
                         .fixedSize()
                         .padding(.horizontal, 10).frame(height: 28)
-                        .glass(Kind.color(l.kind).opacity(0.22), in: Capsule())
+                        .glass(in: Capsule())
                         .glassID("port", ns)
                     if hover && !dying {
                         Button { NSWorkspace.shared.open(URL(string: "http://localhost:\(l.ports[0])")!) } label: {
@@ -211,7 +211,7 @@ private struct LiveRow: View {
                         .foregroundStyle(hover || armed ? .white : Color.red)
                         .glass(hover || armed ? .red.opacity(armed ? 0.95 : 0.75) : .red.opacity(0.12), interactive: true, in: Capsule())
                         .glassID("kill", ns)
-                        .help(l.isProtected ? "\(l.kind) is protected: click twice to stop it" : "Stop this server and free :\(l.ports[0])")
+                        .help(l.isProtected ? "\(l.isDev ? l.kind : "System process") - click twice to stop it" : "Stop this server and free :\(l.ports[0])")
                         .accessibilityLabel("Kill port \(l.ports[0])")
                     } else {
                         ProgressView().controlSize(.small).frame(width: 40, height: 28).glassID("kill", ns)
@@ -228,9 +228,9 @@ private struct LiveRow: View {
             Button("Open in Browser") { NSWorkspace.shared.open(URL(string: "http://localhost:\(l.ports[0])")!) }
             if let f = l.folder { Button("Reveal in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: f) } }
             Divider()
-            Button("Copy URL") { copy("http://localhost:\(l.ports[0])") }
-            Button("Copy Command") { copy(l.launch.map { $0.args.joined(separator: " ") } ?? l.command) }
-            Button("Copy PID") { copy("\(l.pid)") }
+            Button("Copy URL") { store.copy("http://localhost:\(l.ports[0])") }
+            Button("Copy Command") { store.copy(l.launch.map { $0.args.joined(separator: " ") } ?? l.command) }
+            Button("Copy PID") { store.copy("\(l.pid)") }
         }
     }
 
@@ -250,12 +250,6 @@ private struct LiveRow: View {
         }
         armed = false
         store.free(l)
-    }
-
-    private func copy(_ s: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
-        store.say("Copied.")
     }
 }
 
@@ -305,10 +299,7 @@ private struct RecentRow: View {
         .contextMenu {
             Button("Open Log") { NSWorkspace.shared.open(Store.logURL(r)) }
             if let f = r.folder { Button("Reveal in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: f) } }
-            Button("Copy Command") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(r.launch.args.joined(separator: " "), forType: .string)
-            }
+            Button("Copy Command") { store.copy(r.launch.args.joined(separator: " ")) }
             Divider()
             Button("Forget") { store.forget(r) }
         }
@@ -454,5 +445,35 @@ private func uptime(_ since: Date) -> String {
     case ..<3600: return "\(s / 60)m"
     case ..<86400: return "\(s / 3600)h \(s % 3600 / 60)m"
     default: return "\(s / 86400)d"
+    }
+}
+
+struct Welcome: View {
+    @Environment(Store.self) private var store
+    let done: () -> Void
+    @State private var shown = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable().frame(width: 96, height: 96)
+                .scaleEffect(shown ? 1 : 0.8).opacity(shown ? 1 : 0)
+            Text("localhostage lives in your menu bar")
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+            Text("Click \(Image(nsImage: LocalhostageApp.scrap)) at the top of your screen to see every dev server holding a port.")
+                .font(.system(size: 12.5)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Kill frees the port. Run starts it again.")
+                .font(.system(size: 12.5)).foregroundStyle(.secondary)
+            Toggle("Open at login", isOn: Bindable(store).openAtLogin)
+                .toggleStyle(.switch).controlSize(.small).padding(.top, 4)
+            Button("Got it", action: done)
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        }
+        .multilineTextAlignment(.center)
+        .padding(28).frame(width: 420)
+        .onAppear { withAnimation(.spring(duration: 0.5, bounce: 0.2)) { shown = true } }
     }
 }

@@ -39,7 +39,6 @@ struct Recent: Codable, Identifiable, Hashable {
     var id: String { launch.key }
     let launch: Launch
     var project: String
-    var branch: String?
     var folder: String?
     var kind: String
     var command: String
@@ -62,7 +61,17 @@ final class Store {
     var isOpen = false {
         didSet { if isOpen { Task { await refresh() } } }
     }
-    var launchAtLogin = SMAppService.mainApp.status == .enabled
+    var openAtLogin = SMAppService.mainApp.status == .enabled {
+        didSet {
+            guard openAtLogin != (SMAppService.mainApp.status == .enabled) else { return }
+            do {
+                if openAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            } catch {
+                say("Couldn't change login item: \(error.localizedDescription)")
+                openAtLogin = SMAppService.mainApp.status == .enabled
+            }
+        }
+    }
 
     private let scanner = Scanner()
 
@@ -74,6 +83,7 @@ final class Store {
     }
 
     init() {
+        Task { self.welcomeOnce() }
         // ponytail: fixed polling, 2s open / 5s closed. A libproc scan is ~10ms; move to kqueue if it ever shows in Instruments.
         Task {
             while true {
@@ -107,6 +117,7 @@ final class Store {
         dying.insert(l.pid)
         Task {
             await Proc.killTree(l.launcher)
+            toFront([l])
             if sounds { NSSound(named: "Pop")?.play() }
             withAnimation(.spring(duration: 0.45, bounce: 0)) {
                 listeners.removeAll { $0.launcher == l.launcher }
@@ -124,6 +135,7 @@ final class Store {
             await withTaskGroup(of: Void.self) { g in
                 for launcher in Set(targets.map(\.launcher)) { g.addTask { await Proc.killTree(launcher) } }
             }
+            toFront(targets)
             if sounds { NSSound(named: "Pop")?.play() }
             withAnimation(.spring(duration: 0.5, bounce: 0)) {
                 listeners.removeAll { l in targets.contains { $0.pid == l.pid } }
@@ -159,7 +171,7 @@ final class Store {
     private func remember(_ fresh: [Listener]) {
         var changed = false
         for l in fresh where l.canRelaunch {
-            let r = Recent(launch: l.launch!, project: l.project, branch: l.branch, folder: l.folder,
+            let r = Recent(launch: l.launch!, project: l.project, folder: l.folder,
                            kind: l.kind, command: l.command, port: l.ports[0])
             if let i = recents.firstIndex(where: { $0.id == r.id }) {
                 if recents[i] != r { recents[i] = r; changed = true }
@@ -169,6 +181,13 @@ final class Store {
         }
         if recents.count > 20 { recents = Array(recents.prefix(20)) }
         if changed { saveRecents() }
+    }
+
+    /// "Recently stopped" is newest-first.
+    private func toFront(_ killed: [Listener]) {
+        let keys = Set(killed.compactMap { $0.launch?.key })
+        recents = recents.filter { keys.contains($0.id) } + recents.filter { !keys.contains($0.id) }
+        saveRecents()
     }
 
     private static let recentsURL: URL = {
@@ -188,6 +207,24 @@ final class Store {
 
     // MARK: Misc
 
+    private var welcome: NSWindow?
+
+    /// A menu bar app shows nothing on launch, so first-timers think it didn't open. Tell them once where it is.
+    private func welcomeOnce() {
+        guard !UserDefaults.standard.bool(forKey: "welcomed") else { return }
+        UserDefaults.standard.set(true, forKey: "welcomed")
+        let w = NSWindow(contentRect: .zero, styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
+        w.titlebarAppearsTransparent = true
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: Welcome { w.close() }.environment(self))
+        w.contentView = host
+        w.setContentSize(host.fittingSize)
+        w.center()
+        welcome = w
+        NSApp.activate()
+        w.makeKeyAndOrderFront(nil)
+    }
+
     func say(_ text: String) {
         withAnimation(.spring(duration: 0.35, bounce: 0.15)) { toast = text }
         Task {
@@ -196,11 +233,10 @@ final class Store {
         }
     }
 
-    func toggleLaunchAtLogin() {
-        do {
-            if launchAtLogin { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }
-        } catch { say("Couldn't change login item: \(error.localizedDescription)") }
-        launchAtLogin = SMAppService.mainApp.status == .enabled
+    func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+        say("Copied.")
     }
 }
 

@@ -12,7 +12,7 @@ brew install --cask askmaddyy/tap/localhostage
 - **Every hostage, named.** Port, project, git branch, the real command (`npm run dev`, not `node`), uptime, memory, CPU, and who started it: Claude Code, Codex, Cursor, Ghostty, and so on.
 - **Free it properly.** Stops the whole tree, meaning the `npm`/`pnpm` wrapper and everything it spawned, so nothing respawns or leaks. SIGTERM first, SIGKILL after 2s.
 - **Run it again.** Freed servers move to *Recently freed*. Hit Run and it starts again in the same folder with the same command. Output goes to `~/Library/Logs/localhostage/`.
-- **Databases are safe.** Postgres, Redis, Mongo, MySQL, and Docker need a second click and are skipped by *Free all*.
+- **System stuff is safe.** macOS processes, databases (Postgres, Redis, Mongo, MySQL), and Docker are skipped by *Kill all*, and killing one individually needs a second click.
 - **Quiet by default.** macOS daemons and GUI-app helpers (AirPlay, Spotify...) are hidden. Toggle *Show system servers* to see everything.
 - **Light.** Reads sockets straight from `libproc`, with no `lsof` and no subprocesses. A full scan takes ~10ms, and idle CPU is 0%.
 
