@@ -241,7 +241,7 @@ private struct LiveRow: View {
     private var meta: String {
         var parts = [uptime(l.started)]
         // right after uptime so it's never truncated off the end of the line
-        if l.agent != nil, store.autoStopHours > 0 {
+        if l.autoStoppable, store.autoStopHours > 0 {
             let left = store.autoStopHours * 3600 - Date().timeIntervalSince(l.started)
             parts.append(left > 60 ? "auto-stops in \(uptime(Date().addingTimeInterval(-left)))" : "auto-stopping")
         }

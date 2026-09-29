@@ -208,6 +208,7 @@ Task {
         let shouldReap = want != nil && port != 48967  // the database is protected even when an agent started it
         precondition(reap == shouldReap, "auto-stop: :\(port) due=\(reap)")
         precondition(!l.dueForAutoStop(after: 3600), "auto-stop: :\(port) reaped before its time")
+        precondition(l.autoStoppable == shouldReap, "auto-stop: :\(port) countdown would disagree with the reaper")
     }
     precondition(seen.first { $0.ports.contains(48969) }?.origin == "Claude", "desktop app mislabelled")
     print("  ok  auto-stop picks exactly the agent servers (3 of 10)")
@@ -233,6 +234,7 @@ Task {
     let orphanShell = Process()
     orphanShell.executableURL = URL(fileURLWithPath: "/bin/sh")
     orphanShell.arguments = ["-c", "python3 -m http.server 48995 >/dev/null 2>&1 &"]
+    orphanShell.currentDirectoryURL = dir
     try! orphanShell.run(); orphanShell.waitUntilExit()
     guard let o = await find(48995) else { fatalError("orphan not found") }
     precondition(o.isDev && Proc.parent(o.pid) == 1, "orphan should be dev and reparented to launchd")
@@ -242,6 +244,7 @@ Task {
     // stubborn: ignores SIGTERM, must be SIGKILLed after the grace period
     let stubborn = Process()
     stubborn.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    stubborn.currentDirectoryURL = dir
     stubborn.arguments = ["python3", "-c", "import signal,socket,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);s=socket.socket();s.bind(('',48994));s.listen();time.sleep(600)"]
     try! stubborn.run()
     guard let st = await find(48994) else { fatalError("stubborn not found") }
@@ -255,6 +258,7 @@ Task {
     for i in 0..<40 {
         let c = Process()
         c.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        c.currentDirectoryURL = dir
         c.arguments = ["python3", "-c", "import socket,time;s=socket.socket();s.bind(('',\(48900 + i)));s.listen();time.sleep(600)"]
         try! c.run(); crowd.append(c)
     }

@@ -108,7 +108,8 @@ final class Store {
             if !due.isEmpty {
                 let agents = Set(due.compactMap(\.agent))
                 let who = agents.count == 1 ? agents.first! : "your agents"
-                release(due, saying: "Freed \(due.count) server\(due.count == 1 ? "" : "s") \(who) forgot about.")
+                // silent: it happens in the background, and the servers wait in Recently stopped
+                release(due, saying: "Freed \(due.count) server\(due.count == 1 ? "" : "s") \(who) forgot about.", sound: false)
             }
         }
         for (key, since) in starting {
@@ -149,14 +150,14 @@ final class Store {
     }
 
     /// Kill all and auto-stop: stop every tree, move them to Recently stopped, one sound, one toast.
-    private func release(_ targets: [Listener], saying message: String) {
+    private func release(_ targets: [Listener], saying message: String, sound: Bool = true) {
         targets.forEach { dying.insert($0.pid) }
         Task {
             await withTaskGroup(of: Void.self) { g in
                 for launcher in Set(targets.map(\.launcher)) { g.addTask { await Proc.killTree(launcher) } }
             }
             toFront(targets)
-            if sounds { NSSound(named: "Pop")?.play() }
+            if sounds && sound { NSSound(named: "Pop")?.play() }
             withAnimation(.spring(duration: 0.5, bounce: 0)) {
                 listeners.removeAll { l in targets.contains { $0.pid == l.pid } }
                 dying.subtract(targets.map(\.pid))

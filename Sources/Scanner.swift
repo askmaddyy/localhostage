@@ -65,9 +65,11 @@ struct Listener: Hashable, Sendable {
     /// The coding agent that started it (not one you typed in a terminal), e.g. "Claude Code". See `Proc.agent(of:)`.
     let agent: String?
 
-    /// Auto-stop only ever touches servers an agent started, never protected ones, and only once they're old enough.
+    /// Auto-stop only ever touches servers an agent started, never protected ones. The row's countdown uses this too.
+    var autoStoppable: Bool { agent != nil && isDev && !isProtected }
+
     func dueForAutoStop(after age: TimeInterval, now: Date = Date()) -> Bool {
-        agent != nil && isDev && !isProtected && now.timeIntervalSince(started) >= age
+        autoStoppable && now.timeIntervalSince(started) >= age
     }
 
     /// Skipped by Kill all; a single Kill asks "Sure?" first. System processes (only listed with "Show system servers") and data stores.
