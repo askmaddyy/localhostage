@@ -76,6 +76,29 @@ Task {
     precondition(n2.launch?.key == n.launch?.key && n2.command == "npm run dev")
     await Proc.killTree(n2.launcher)
 
+    // regression: npm typed into an interactive shell on a pty whose host we don't recognise.
+    // The launcher must be `npm run dev`, never the user's shell (v1.0.0 saved `-zsh` and Run failed).
+    let term = Process()
+    term.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+    term.arguments = ["-q", "/dev/null", "/bin/zsh", "-f", "-i"]
+    let input = Pipe()
+    term.standardInput = input
+    term.standardOutput = FileHandle.nullDevice
+    try! term.run()
+    input.fileHandleForWriting.write(Data("cd \(npmDir.path) && npm run dev\n".utf8))
+    guard let t = await find(48997) else { fatalError("pty npm server not found") }
+    print("  pty: `\(t.command)` launcher=\(Proc.name(t.launcher))")
+    precondition(t.command == "npm run dev" && t.launch?.args.first != "-zsh" && Proc.name(t.launcher) != "zsh", "launcher climbed into the shell")
+    await Proc.killTree(t.launcher)
+    term.terminate()
+
+    // a Run that dies immediately reports its exit code right away
+    let exitCode = await withCheckedContinuation { c in
+        try! Launch(exe: "/usr/bin/false", cwd: "/", args: ["false"], env: [:])
+            .start(log: dir.appendingPathComponent("false.log"), header: "false") { c.resume(returning: $0) }
+    }
+    precondition(exitCode == 1, "exit code \(exitCode)")
+
     // orphan: the shell that started it is gone, it must still show and die
     let orphanShell = Process()
     orphanShell.executableURL = URL(fileURLWithPath: "/bin/sh")

@@ -1,5 +1,5 @@
+import AppKit
 import Darwin
-import Foundation
 
 /// How to start a server again: the top non-shell ancestor's argv, its cwd, and a safe slice of its env.
 struct Launch: Codable, Hashable, Sendable {
@@ -12,8 +12,8 @@ struct Launch: Codable, Hashable, Sendable {
         ([cwd, ((args.first ?? "") as NSString).lastPathComponent] + args.dropFirst()).joined(separator: "\u{1F}")
     }
 
-    /// Starts it detached, with stdout/stderr going to `log` (truncated each run).
-    func start(log: URL, header: String) throws {
+    /// Starts it detached, with stdout/stderr going to `log` (truncated each run). `onExit` gets the exit code.
+    func start(log: URL, header: String, onExit: @escaping @Sendable (Int32) -> Void = { _ in }) throws {
         let p = Process()
         // argv[0] names the binary we saw (or a shebang interpreter); a rewritten title like `npm` is resolved via PATH
         if (args[0] as NSString).lastPathComponent == (exe as NSString).lastPathComponent {
@@ -34,6 +34,7 @@ struct Launch: Codable, Hashable, Sendable {
         p.standardOutput = out
         p.standardError = out
         p.standardInput = FileHandle.nullDevice
+        p.terminationHandler = { onExit($0.terminationStatus) }
         try p.run()
     }
 }
@@ -82,7 +83,7 @@ actor Scanner {
                 let exe = Proc.path(launcher)
                 let origin = Proc.origin(of: pid)
                 // an orphan living inside an app bundle is that app's helper (updaters etc.), not something you ran
-                let ours = byUser && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
+                let ours = byUser && !Proc.isGUIApp(launcher) && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
                 let launch = (!ours || largs.isEmpty || lcwd == nil || exe.isEmpty) ? nil : Launch(exe: exe, cwd: lcwd!, args: largs, env: env)
                 cache[pid] = Static(start: start, args: Proc.argsAndEnv(pid).args, path: Proc.path(pid), cwd: cwd,
                                     origin: origin, launcher: launcher, launch: launch)
@@ -107,7 +108,7 @@ actor Scanner {
                 command: Proc.pretty(s.launch?.args ?? s.args, fallback: name), kind: kind, origin: s.origin,
                 started: Date(timeIntervalSince1970: TimeInterval(start)),
                 memory: mem, cpu: cpu,
-                isDev: Kinds.isDev(path: s.path, kind: kind, origin: s.origin),
+                isDev: Kinds.isDev(path: s.path, kind: kind, origin: s.origin) && (s.origin != nil || !Proc.isApp(pid)),
                 launch: s.launch))
         }
         cache = cache.filter { seen.contains($0.key) }
@@ -265,9 +266,11 @@ enum Proc {
             guard let p = parent(cur), p > 1, bsdInfo(p)?.pbi_uid == getuid() else { break }
             if isGUIApp(p) { return (cur, false) }
             if isAgent(p) { break }
-            // a shell under a terminal/agent/app is the user's; `sh -c` under npm/yarn/make is part of the job
+            // Interactive/login shells (`-zsh`, no -c) are the user's terminal: stop. A `sh -c` spawned by
+            // npm/yarn/make is part of the job: keep climbing, unless a terminal/agent/app ran that -c.
             if shells.contains(name(p).lowercased()) {
-                guard let gp = parent(p), gp > 1, !shells.contains(name(gp).lowercased()), !isAgent(gp), !isGUIApp(gp) else { break }
+                guard argsAndEnv(p).args.contains("-c"), let gp = parent(p), gp > 1,
+                      !shells.contains(name(gp).lowercased()), !isAgent(gp), !isGUIApp(gp) else { break }
             }
             cur = p
         }
@@ -276,8 +279,13 @@ enum Proc {
 
     private static func isAgent(_ p: pid_t) -> Bool { Kinds.originName(name(p).lowercased(), args: argsAndEnv(p).args) != nil }
 
-    // bundled runtimes like Xcode's Python.app live inside a .framework; any other .app is a GUI app
-    private static func isGUIApp(_ p: pid_t) -> Bool {
+    /// A real app (Dock or menu bar). NSRunningApplication exists for every pid; plain processes are `.prohibited`.
+    static func isApp(_ p: pid_t) -> Bool { (NSRunningApplication(processIdentifier: p)?.activationPolicy ?? .prohibited) != .prohibited }
+
+    /// An app (Chrome, Ollama.app, menu bar apps) (Chrome, Ollama.app, menu bar apps), or its binary sits in an app bundle.
+    /// Bundled runtimes like Xcode's Python.app live inside a .framework and don't count.
+    static func isGUIApp(_ p: pid_t) -> Bool {
+        if isApp(p) { return true }
         let pp = path(p)
         return pp.contains(".app/") && !pp.contains(".framework/")
     }

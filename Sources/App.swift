@@ -150,12 +150,21 @@ final class Store {
 
     func run(_ r: Recent) {
         do {
-            try r.launch.start(log: Self.logURL(r), header: r.command)
+            try r.launch.start(log: Self.logURL(r), header: r.command) { code in
+                Task { @MainActor in self.exited(r, code) }
+            }
             withAnimation(.snappy) { starting[r.id] = Date() }
             say("Taking :\(r.port) hostage again.")
         } catch {
             say("Couldn't start \(r.project): \(error.localizedDescription)")
         }
+    }
+
+    /// A crash before the port comes up is reported now, not after the 25s timeout.
+    private func exited(_ r: Recent, _ code: Int32) {
+        guard code != 0, starting.removeValue(forKey: r.id) != nil else { return }
+        say("\(r.project) exited (code \(code)). Opening its log.")
+        NSWorkspace.shared.open(Self.logURL(r))
     }
 
     func forget(_ r: Recent) {
