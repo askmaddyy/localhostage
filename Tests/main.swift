@@ -7,15 +7,74 @@ let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lhg-che
 try FileManager.default.createDirectory(at: dir.appendingPathComponent(".git"), withIntermediateDirectories: true)
 try "ref: refs/heads/feature/test\n".write(to: dir.appendingPathComponent(".git/HEAD"), atomically: true, encoding: .utf8)
 
-// A server started from a shell, like a terminal would.
-let sh = Process()
-sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-sh.arguments = ["-c", "python3 -m http.server 48999 >/dev/null 2>&1 & wait"]
-sh.currentDirectoryURL = dir
-try sh.run()
+// A server typed into a terminal (an interactive zsh on a pty)
+let server = typeInTerminal("python3 -m http.server 48999", in: dir)
 
-func find(_ port: Int) async -> Listener? {
-    for _ in 0..<30 {
+/// Types `cmd` into an interactive zsh on a pseudo-terminal, the way a real terminal runs what you type.
+/// With `agent: true`, a process named like Claude Code runs it as `zsh -c "<cmd>"` instead, as agents do.
+func typeInTerminal(_ cmd: String, in dir: URL, agent: Bool = false) -> Process {
+    let term = Process()
+    if agent {
+        // a real binary named like Claude Code that runs `zsh -c <cmd>` and waits, as agents do
+        let sim = dir.appendingPathComponent("claude-sim")
+        if !FileManager.default.fileExists(atPath: sim.path) {
+            try! """
+            #include <unistd.h>
+            #include <sys/wait.h>
+            int main(int c, char **v) { pid_t p = fork(); if (!p) { execl("/bin/zsh", "zsh", "-f", "-c", v[1], (char *)0); _exit(127); } int s; waitpid(p, &s, 0); return 0; }
+            """
+                .write(to: dir.appendingPathComponent("sim.c"), atomically: true, encoding: .utf8)
+            shell("cc -o claude-sim sim.c", in: dir)
+        }
+        term.executableURL = sim
+        term.arguments = [cmd]
+    } else {
+        term.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+        term.arguments = ["-q", "/dev/null", "/bin/zsh", "-f", "-i"]
+    }
+    term.currentDirectoryURL = dir
+    let input = Pipe()
+    term.standardInput = input
+    term.standardOutput = FileHandle.nullDevice
+    try! term.run()
+    input.fileHandleForWriting.write(Data("\(cmd)\n".utf8))
+    return term
+}
+
+func shell(_ cmd: String, in dir: URL) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-c", cmd]
+    p.currentDirectoryURL = dir
+    try! p.run(); p.waitUntilExit()
+    precondition(p.terminationStatus == 0, "setup failed: \(cmd)")
+}
+
+/// Types `typed` into an interactive zsh on a pty in `dir`, like a terminal. Checks the app records exactly that
+/// command, Kill takes the whole job down, and Run (the app's own code path) brings the port back.
+func roundTrip(_ name: String, dir: URL, typed: String, port: Int, expect: String?, tries: Int = 30, agent: Bool = false) async {
+    let term = typeInTerminal(typed, in: dir, agent: agent)
+    guard let l = await find(port, tries: tries) else { fatalError("\(name): never listened") }
+    precondition(expect == nil || l.command == expect, "\(name): recorded `\(l.command)`")
+    guard let launch = l.launch else { fatalError("\(name): not offered for Run") }
+    await Proc.killTree(l.launcher)
+    precondition(!Proc.isAlive(l.pid) && !Proc.isAlive(l.launcher), "\(name): survived Kill")
+    let gone = await Scanner().scan()
+    precondition(!gone.contains { $0.ports.contains(port) }, "\(name): port still held")
+    let log = dir.appendingPathComponent("\(name).log")
+    // replay with only what's saved to disk: Run must also work after the app restarts
+    try! launch.persisted.start(log: log, header: l.command)
+    guard let again = await find(port, tries: tries) else {
+        fatalError("\(name): Run didn't bring it back:\n" + ((try? String(contentsOf: log, encoding: .utf8)) ?? ""))
+    }
+    precondition(again.launch?.key == launch.key, "\(name): relaunch identity changed")
+    await Proc.killTree(again.launcher)
+    term.terminate()
+    print("  ok  \(name.padding(toLength: 8, withPad: " ", startingAt: 0)) `\(l.command)`")
+}
+
+func find(_ port: Int, tries: Int = 30) async -> Listener? {
+    for _ in 0..<tries {
         if let l = await Scanner().scan().first(where: { $0.ports.contains(port) }) { return l }
         try? await Task.sleep(for: .milliseconds(200))
     }
@@ -58,43 +117,44 @@ Task {
     try! FileManager.default.createDirectory(at: npmDir, withIntermediateDirectories: true)
     try! #"{"name":"npmapp","scripts":{"dev":"node server.js"}}"#.write(to: npmDir.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
     try! "const h=require('http');h.createServer((q,r)=>r.end('ok')).listen(48997);h.createServer().listen(48996);".write(to: npmDir.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
-    let npm = Process()
-    npm.executableURL = URL(fileURLWithPath: "/bin/sh")
-    npm.arguments = ["-c", "npm run dev >/dev/null 2>&1"]
-    npm.currentDirectoryURL = npmDir
-    try! npm.run()
-    guard let n = await find(48997) else { fatalError("npm server not found") }
-    print("  \(n.ports) \(n.kind) `\(n.command)` launcher=\(n.launcher) pid=\(n.pid)")
-    precondition(n.ports == [48996, 48997], "ports \(n.ports)")
-    precondition(n.kind == "Node", "kind \(n.kind)")
-    precondition(n.command == "npm run dev", "command \(n.command)")
-    precondition(n.launcher != n.pid, "launcher should be npm, not node")
-    await Proc.killTree(n.launcher)
-    precondition(!Proc.isAlive(n.pid) && !Proc.isAlive(n.launcher), "npm tree survived")
-    try! n.launch!.start(log: dir.appendingPathComponent("npm.log"), header: n.command)
-    guard let n2 = await find(48997) else { fatalError("npm relaunch did not listen") }
-    precondition(n2.launch?.key == n.launch?.key && n2.command == "npm run dev")
-    await Proc.killTree(n2.launcher)
+    // Real toolchains, typed into an interactive shell on a pty exactly like a terminal. Each must round-trip:
+    // the app sees the typed command, Kill frees the port, Run brings it back. No guessing allowed.
+    let rust = dir.appendingPathComponent("rustapp")
+    try! FileManager.default.createDirectory(at: rust.appendingPathComponent("src"), withIntermediateDirectories: true)
+    try! "[package]\nname = \"rustapp\"\nversion = \"0.1.0\"\nedition = \"2021\"\n".write(to: rust.appendingPathComponent("Cargo.toml"), atomically: true, encoding: .utf8)
+    try! "fn main() { let l = std::net::TcpListener::bind(\"127.0.0.1:48974\").unwrap(); for s in l.incoming() { drop(s); } }".write(to: rust.appendingPathComponent("src/main.rs"), atomically: true, encoding: .utf8)
+    shell("cargo build -q", in: rust)  // warm build so `cargo run` starts fast
 
-    // regression: npm typed into an interactive shell on a pty whose host we don't recognise.
-    // The launcher must be `npm run dev`, never the user's shell (v1.0.0 saved `-zsh` and Run failed).
-    let term = Process()
-    term.executableURL = URL(fileURLWithPath: "/usr/bin/script")
-    term.arguments = ["-q", "/dev/null", "/bin/zsh", "-f", "-i"]
-    let input = Pipe()
-    term.standardInput = input
-    term.standardOutput = FileHandle.nullDevice
-    try! term.run()
-    input.fileHandleForWriting.write(Data("cd \(npmDir.path) && npm run dev\n".utf8))
-    guard let t = await find(48997) else { fatalError("pty npm server not found") }
-    print("  pty: `\(t.command)` launcher=\(Proc.name(t.launcher))")
-    precondition(t.command == "npm run dev" && t.launch?.args.first != "-zsh" && Proc.name(t.launcher) != "zsh", "launcher climbed into the shell")
-    await Proc.killTree(t.launcher)
-    term.terminate()
+    let envapp = dir.appendingPathComponent("envapp")
+    try! FileManager.default.createDirectory(at: envapp, withIntermediateDirectories: true)
+    try! "require('http').createServer((q,r)=>r.end('ok')).listen(+process.env.PORT)".write(to: envapp.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
+
+    let venv = dir.appendingPathComponent("venvapp")
+    try! FileManager.default.createDirectory(at: venv, withIntermediateDirectories: true)
+    try! "import sys, http.server\nassert sys.prefix != sys.base_prefix, 'not in venv'\nhttp.server.test(HandlerClass=http.server.SimpleHTTPRequestHandler, port=48978)".write(to: venv.appendingPathComponent("server.py"), atomically: true, encoding: .utf8)
+    shell("uv venv -q .venv", in: venv)
+
+    let scripted = dir.appendingPathComponent("scriptapp")
+    try! FileManager.default.createDirectory(at: scripted, withIntermediateDirectories: true)
+    try! "#!/bin/bash\necho starting\npython3 -m http.server 48975\n".write(to: scripted.appendingPathComponent("start.sh"), atomically: true, encoding: .utf8)
+    shell("chmod +x start.sh", in: scripted)
+    try! "dev:\n\tpython3 -m http.server 48976\n".write(to: scripted.appendingPathComponent("Makefile"), atomically: true, encoding: .utf8)
+
+    await roundTrip("npm", dir: npmDir, typed: "npm run dev", port: 48997, expect: "npm run dev")
+    await roundTrip("env var", dir: envapp, typed: "PORT=48980 node server.js", port: 48980, expect: "node server.js")
+    await roundTrip("bun", dir: npmDir, typed: "bun server.js", port: 48997, expect: "bun server.js")
+    await roundTrip("venv", dir: venv, typed: "source .venv/bin/activate && python server.py", port: 48978, expect: "python server.py")
+    await roundTrip("uv run", dir: venv, typed: "uv run --no-project python -m http.server 48977", port: 48977, expect: nil)
+    await roundTrip("make", dir: scripted, typed: "make dev", port: 48976, expect: "make dev")
+    await roundTrip("script", dir: scripted, typed: "./start.sh", port: 48975, expect: "bash start.sh")
+    // `cargo run` execs the built binary (it's gone from the tree), so the binary itself is what's replayed
+    await roundTrip("cargo", dir: rust, typed: "cargo run -q", port: 48974, expect: "rustapp", tries: 100)
+    await roundTrip("agent", dir: npmDir, typed: "npm run dev", port: 48997, expect: "npm run dev", agent: true)
+    await roundTrip("ruby", dir: scripted, typed: "ruby -run -e httpd . -p 48973", port: 48973, expect: "ruby -run -e httpd . -p 48973")
 
     // a Run that dies immediately reports its exit code right away
     let exitCode = await withCheckedContinuation { c in
-        try! Launch(exe: "/usr/bin/false", cwd: "/", args: ["false"], env: [:])
+        try! Launch(cwd: "/", args: ["false"], env: ["PATH": "/usr/bin"])
             .start(log: dir.appendingPathComponent("false.log"), header: "false") { c.resume(returning: $0) }
     }
     precondition(exitCode == 1, "exit code \(exitCode)")
@@ -143,5 +203,5 @@ Task {
     sem.signal()
 }
 sem.wait()
-sh.terminate()
+server.terminate()
 try? FileManager.default.removeItem(at: dir)

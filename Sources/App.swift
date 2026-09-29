@@ -37,7 +37,7 @@ struct LocalhostageApp: App {
 /// A server we've seen running, kept so it can be started again after it's freed.
 struct Recent: Codable, Identifiable, Hashable {
     var id: String { launch.key }
-    let launch: Launch
+    var launch: Launch
     var project: String
     var folder: String?
     var kind: String
@@ -211,7 +211,8 @@ final class Store {
     }
 
     private func saveRecents() {
-        try? JSONEncoder().encode(recents).write(to: Self.recentsURL, options: .atomic)
+        let onDisk = recents.map { r in var r = r; r.launch = r.launch.persisted; return r }
+        try? JSONEncoder().encode(onDisk).write(to: Self.recentsURL, options: .atomic)
     }
 
     // MARK: Misc

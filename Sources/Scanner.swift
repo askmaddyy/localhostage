@@ -1,31 +1,39 @@
 import AppKit
 import Darwin
 
-/// How to start a server again: the top non-shell ancestor's argv, its cwd, and a safe slice of its env.
+/// How to start a server again: exactly what was typed (argv of the top process below your shell), where
+/// (its cwd), and with what environment. Replayed through `env`, so the command is looked up in the saved PATH
+/// the same way your shell did (a venv's `python`, nvm's `node`), not re-guessed.
 struct Launch: Codable, Hashable, Sendable {
-    let exe: String  // resolved binary (argv[0] may be a bare `npm` or `Python`); shebang scripts show up as their interpreter
     let cwd: String
     let args: [String]
+    /// Full environment in memory; only `Proc.keptEnv` is ever written to disk (see `persisted`).
     let env: [String: String]
+
     /// argv[0] is compared by basename: a relaunch gets the resolved path where the original may have had a symlink.
     var key: String {
         ([cwd, ((args.first ?? "") as NSString).lastPathComponent] + args.dropFirst()).joined(separator: "\u{1F}")
     }
 
+    var persisted: Launch { Launch(cwd: cwd, args: args, env: env.filter { Proc.keptEnv.contains($0.key) }) }
+
+    /// argv[0] must resolve to a real executable, as the shell would find it. A rewritten process title
+    /// ("next-server (v15)", "postgres: writer") or a login shell ("-zsh") doesn't, so it's never offered for Run.
+    var isRunnable: Bool {
+        guard let cmd = args.first, !cmd.isEmpty, !cmd.hasPrefix("-"), FileManager.default.fileExists(atPath: cwd) else { return false }
+        let fm = FileManager.default
+        if cmd.contains("/") {
+            return fm.isExecutableFile(atPath: cmd.hasPrefix("/") ? cmd : (cwd as NSString).appendingPathComponent(cmd))
+        }
+        return (env["PATH"] ?? "").split(separator: ":").contains { fm.isExecutableFile(atPath: "\($0)/\(cmd)") }
+    }
+
     /// Starts it detached, with stdout/stderr going to `log` (truncated each run). `onExit` gets the exit code.
     func start(log: URL, header: String, onExit: @escaping @Sendable (Int32) -> Void = { _ in }) throws {
         let p = Process()
-        // argv[0] names the binary we saw (or a shebang interpreter); a rewritten title like `npm` is resolved via PATH
-        if (args[0] as NSString).lastPathComponent == (exe as NSString).lastPathComponent {
-            p.executableURL = URL(fileURLWithPath: exe)
-            p.arguments = Array(args.dropFirst())
-        } else {
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            p.arguments = args
-        }
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/env")  // PATH lookup from `env` below, like the shell
+        p.arguments = ["--"] + args
         p.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        var env = env
-        if env["PATH"] == nil { env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
         p.environment = env
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: log.path, contents: Data("$ \(header)\n".utf8))
@@ -78,13 +86,13 @@ actor Scanner {
             if cache[pid]?.start != start {
                 let cwd = Proc.cwd(pid)
                 let (launcher, byUser) = Proc.launcher(of: pid)
-                let (largs, env) = Proc.argsAndEnv(launcher)
-                let lcwd = Proc.cwd(launcher) ?? cwd
+                let (largs, ownEnv) = Proc.argsAndEnv(launcher)
+                let env = ownEnv["PATH"] == nil ? Proc.loginEnv.merging(ownEnv) { $1 } : ownEnv
                 let exe = Proc.path(launcher)
                 let origin = Proc.origin(of: pid)
                 // an orphan living inside an app bundle is that app's helper (updaters etc.), not something you ran
                 let ours = byUser && !Proc.isGUIApp(launcher) && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
-                let launch = (!ours || largs.isEmpty || lcwd == nil || exe.isEmpty) ? nil : Launch(exe: exe, cwd: lcwd!, args: largs, env: env)
+                let launch = (Proc.cwd(launcher) ?? cwd).map { Launch(cwd: $0, args: largs, env: env) }.flatMap { ours && $0.isRunnable ? $0 : nil }
                 cache[pid] = Static(start: start, args: Proc.argsAndEnv(pid).args, path: Proc.path(pid), cwd: cwd,
                                     origin: origin, launcher: launcher, launch: launch)
             }
@@ -184,10 +192,32 @@ enum Proc {
         return s.isEmpty ? nil : s
     }
 
-    /// Only these env vars are kept for relaunching; secrets in the environment are never persisted.
+    /// The environment a new terminal gets, resolved once from your login shell (as VS Code does). Used when a
+    /// process hid its own: ruby, zsh and others reuse that memory for their process title.
+    static let loginEnv: [String: String] = {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        p.arguments = ["-ilc", "printf '\\n__lhg__\\n'; /usr/bin/env -0"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return [:] }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard let marker = text.range(of: "\n__lhg__\n") else { return [:] }
+        var env: [String: String] = [:]
+        for kv in text[marker.upperBound...].split(separator: "\0") {
+            if let eq = kv.firstIndex(of: "=") { env[String(kv[..<eq])] = String(kv[kv.index(after: eq)...]) }
+        }
+        return env
+    }()
+
+    /// The only env vars written to disk (for Run after the app restarts). Secrets in the environment never are.
     static let keptEnv: Set<String> = [
         "PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "NODE_ENV", "PORT", "HOST", "VIRTUAL_ENV", "CONDA_PREFIX",
-        "NVM_DIR", "NVM_BIN", "PYENV_VERSION", "JAVA_HOME", "GOPATH", "BUN_INSTALL", "PNPM_HOME", "VOLTA_HOME",
+        "NVM_DIR", "NVM_BIN", "PYENV_VERSION", "JAVA_HOME", "GOPATH", "GOROOT", "BUN_INSTALL", "PNPM_HOME", "VOLTA_HOME",
+        "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "GEM_HOME", "GEM_PATH", "RBENV_VERSION", "TMPDIR",
     ]
 
     /// KERN_PROCARGS2 layout: [argc:int32][exec path\0][\0 padding][argv...\0][env...\0]
@@ -209,14 +239,16 @@ enum Proc {
         }
         var args: [String] = []
         while args.count < argc, i < size { args.append(next()) }
-        // node/npm overwrite argv with a title ("npm run dev", "", "", ...): split it back into words
+        // node/npm overwrite argv with a title ("npm run dev", "", "", ...) and zero-pad the rest of the old argv
+        // area: skip that padding to reach the environment, then split the title back into words
+        if args.last == "" { while i < size, buf[i] == 0 { i += 1 } }
         while args.last == "" { args.removeLast() }
         if args.count == 1, args[0].contains(" "), !args[0].contains("/") { args = args[0].split(separator: " ").map(String.init) }
         var env: [String: String] = [:]
         while i < size {
             let kv = next()
             if kv.isEmpty { break }
-            if let eq = kv.firstIndex(of: "="), keptEnv.contains(String(kv[..<eq])) {
+            if let eq = kv.firstIndex(of: "=") {
                 env[String(kv[..<eq])] = String(kv[kv.index(after: eq)...])
             }
         }
@@ -266,16 +298,21 @@ enum Proc {
             guard let p = parent(cur), p > 1, bsdInfo(p)?.pbi_uid == getuid() else { break }
             if isGUIApp(p) { return (cur, false) }
             if isAgent(p) { break }
-            // Interactive/login shells (`-zsh`, no -c) are the user's terminal: stop. A `sh -c` spawned by
-            // npm/yarn/make is part of the job: keep climbing, unless a terminal/agent/app ran that -c.
+            // An interactive/login shell (`-zsh`, no -c, no script) is your terminal: stop. A shell running a script
+            // (`./start.sh`) or a `sh -c` from npm/yarn/make is part of the job: keep climbing, unless an agent or
+            // app ran it (Claude Code's `zsh -c`, a VS Code task) - then the command it ran is what you typed.
             if shells.contains(name(p).lowercased()) {
-                guard argsAndEnv(p).args.contains("-c"), let gp = parent(p), gp > 1,
-                      !shells.contains(name(gp).lowercased()), !isAgent(gp), !isGUIApp(gp) else { break }
+                let a = argsAndEnv(p).args
+                let interactive = (a.first ?? "").hasPrefix("-") || !a.dropFirst().contains { !$0.hasPrefix("-") }
+                guard !interactive, let gp = parent(p), gp > 1, isUs(gp) || (!isAgent(gp) && !isGUIApp(gp)) else { break }
             }
             cur = p
         }
         return (cur, true)
     }
+
+    /// localhostage itself: a server we started with Run must resolve to the same launch it was recorded with.
+    private static func isUs(_ p: pid_t) -> Bool { Kinds.originName(name(p).lowercased(), args: []) == "localhostage" }
 
     private static func isAgent(_ p: pid_t) -> Bool { Kinds.originName(name(p).lowercased(), args: argsAndEnv(p).args) != nil }
 
@@ -283,11 +320,11 @@ enum Proc {
     static func isApp(_ p: pid_t) -> Bool { (NSRunningApplication(processIdentifier: p)?.activationPolicy ?? .prohibited) != .prohibited }
 
     /// An app (Chrome, Ollama.app, menu bar apps) (Chrome, Ollama.app, menu bar apps), or its binary sits in an app bundle.
-    /// Bundled runtimes like Xcode's Python.app live inside a .framework and don't count.
+    /// Bundled runtimes (Xcode's Python.app in a .framework) and Xcode's command-line tools (make, git) don't count.
     static func isGUIApp(_ p: pid_t) -> Bool {
         if isApp(p) { return true }
         let pp = path(p)
-        return pp.contains(".app/") && !pp.contains(".framework/")
+        return pp.contains(".app/") && !pp.contains(".framework/") && !pp.contains(".app/Contents/Developer/")
     }
 
     /// First recognisable app or agent up the parent chain.
@@ -310,7 +347,7 @@ enum Proc {
         var a = args.map { $0.contains("/") ? ($0 as NSString).lastPathComponent : $0 }
         // `node /opt/homebrew/bin/npm run dev` -> `npm run dev`
         if a.count > 1, interpreters.contains(a[0].lowercased()), args[1].contains("/"), !args[1].hasPrefix("-") { a.removeFirst() }
-        return a.prefix(6).joined(separator: " ")
+        return a.prefix(12).joined(separator: " ")
     }
 
     // ponytail: kills the launcher's whole tree, so a `concurrently` running two servers loses both. Fine for dev.
@@ -371,7 +408,8 @@ enum Kinds {
     /// Hides OS daemons and GUI apps' helper servers (AirPlay, Spotify, Figma...). Anything started
     /// from a terminal/agent, or recognised as a runtime (orphaned `node`, Xcode's Python.app), counts.
     static func isDev(path: String, kind: String, origin: String?) -> Bool {
-        if systemPrefixes.contains(where: path.hasPrefix) { return false }
+        // /System also holds runtimes (macOS's ruby, perl): a server you started from a terminal is yours
+        if systemPrefixes.contains(where: path.hasPrefix) { return origin != nil }
         return origin != nil || kind != "Process" || !path.contains(".app/Contents/")
     }
 }
