@@ -351,6 +351,8 @@ enum Proc {
                 if interactive { return nil }
             } else if isUs(cur) {
                 return nil  // started with Run
+            } else if name(cur).hasPrefix("Claude") {
+                break  // the Claude desktop app (not the `claude` CLI): its terminal tabs and MCP servers are yours
             } else if let o = Kinds.originName(n, args: args), Kinds.agents.contains(o) {
                 return o
             } else if isGUIApp(cur) || Kinds.originName(n, args: args) != nil {
@@ -377,6 +379,7 @@ enum Proc {
         var p = parent(pid)
         for _ in 0..<16 {
             guard let cur = p, cur > 1 else { return nil }
+            if name(cur).hasPrefix("Claude") { return "Claude" }  // desktop app; the agent CLI is lowercase `claude`
             let n = name(cur).lowercased()
             let args = n == "node" ? argsAndEnv(cur).args : []
             if let hit = Kinds.originName(n, args: args) { return hit }

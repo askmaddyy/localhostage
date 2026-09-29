@@ -191,8 +191,14 @@ Task {
     procs.append(typeInTerminal("CLAUDECODE=1 python3 -m http.server 48966", in: dir))              // typed, marker set by hand
     procs.append(typeInTerminal("./postgres 48967", in: dir, agent: true))                          // agent started a database
     procs.append(typeInTerminal("./Fake.app/Contents/MacOS/helper 48968", in: dir, agent: true))    // an app's own helper
+    shell("cp claude-sim ClaudeDesk", in: dir)                                                      // the Claude desktop app (capital C),
+    let desk = Process()                                                                            // not the `claude` agent CLI
+    desk.executableURL = dir.appendingPathComponent("ClaudeDesk")
+    desk.arguments = ["python3 -m http.server 48969"]
+    desk.currentDirectoryURL = dir
+    try! desk.run(); procs.append(desk)
     let expected: [Int: String?] = [48960: "Claude Code", 48961: nil, 48962: nil, 48963: "Claude Code", 48964: "Codex",
-                                    48965: nil, 48966: nil, 48967: "Claude Code", 48968: nil]
+                                    48965: nil, 48966: nil, 48967: "Claude Code", 48968: nil, 48969: nil]
     for port in expected.keys.sorted() { _ = await find(port) }
     let seen = await Scanner().scan()
     for (port, want) in expected.sorted(by: { $0.key < $1.key }) {
@@ -203,7 +209,8 @@ Task {
         precondition(reap == shouldReap, "auto-stop: :\(port) due=\(reap)")
         precondition(!l.dueForAutoStop(after: 3600), "auto-stop: :\(port) reaped before its time")
     }
-    print("  ok  auto-stop picks exactly the agent servers (3 of 9)")
+    precondition(seen.first { $0.ports.contains(48969) }?.origin == "Claude", "desktop app mislabelled")
+    print("  ok  auto-stop picks exactly the agent servers (3 of 10)")
 
     // Run makes it yours: the relaunched server carries no agent markers and is never auto-stopped
     let orphan = seen.first { $0.ports.contains(48963) }!

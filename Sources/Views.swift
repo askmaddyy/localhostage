@@ -239,14 +239,16 @@ private struct LiveRow: View {
     }
 
     private var meta: String {
-        var parts = [uptime(l.started), l.memory.formatted(.byteCount(style: .memory))]
-        if l.cpu >= 1 { parts.append("\(Int(l.cpu))% CPU") }
-        if l.ports.count > 1 { parts.append("+" + l.ports.dropFirst().map(String.init).joined(separator: ", ")) }
-        if let o = l.origin { parts.append("via \(o)") }
+        var parts = [uptime(l.started)]
+        // right after uptime so it's never truncated off the end of the line
         if l.agent != nil, store.autoStopHours > 0 {
             let left = store.autoStopHours * 3600 - Date().timeIntervalSince(l.started)
             parts.append(left > 60 ? "auto-stops in \(uptime(Date().addingTimeInterval(-left)))" : "auto-stopping")
         }
+        parts.append(l.memory.formatted(.byteCount(style: .memory)))
+        if l.cpu >= 1 { parts.append("\(Int(l.cpu))% CPU") }
+        if l.ports.count > 1 { parts.append("+" + l.ports.dropFirst().map(String.init).joined(separator: ", ")) }
+        if let o = l.agent ?? l.origin { parts.append("via \(o)") }
         return parts.joined(separator: "  ·  ")
     }
 
