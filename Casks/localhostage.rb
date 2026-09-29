@@ -2,7 +2,7 @@ cask "localhostage" do
   version "1.0.0"
   sha256 "REPLACED_BY_RELEASE_SCRIPT"
 
-  url "https://github.com/askmaddyy/localhostage/releases/download/v#{version}/localhostage-#{version}.zip"
+  url "https://github.com/askmaddyy/localhostage/releases/download/v#{version}/localhostage.dmg"
   name "localhostage"
   desc "Menu bar app that shows which dev servers are holding your ports, and frees them"
   homepage "https://github.com/askmaddyy/localhostage"
