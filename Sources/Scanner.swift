@@ -70,7 +70,7 @@ struct Listener: Hashable, Sendable {
 
 /// Reads listening TCP sockets straight from libproc: no lsof, no subprocesses. A full scan is ~10ms.
 actor Scanner {
-    private struct Static { let start: Int; let args: [String]; let path: String; let cwd: String?; let origin: String?; let launcher: pid_t; let launch: Launch? }
+    private struct Static { let start: Int; let args: [String]; let path: String; let cwd: String?; let origin: String?; let launcher: pid_t; let byApp: Bool; let launch: Launch? }
     private var cache: [pid_t: Static] = [:]
     private var lastCPU: [pid_t: (ticks: UInt64, at: UInt64)] = [:]
 
@@ -94,7 +94,7 @@ actor Scanner {
                 let ours = byUser && !Proc.isGUIApp(launcher) && (origin != nil || !exe.contains(".app/") || exe.contains(".framework/"))
                 let launch = (Proc.cwd(launcher) ?? cwd).map { Launch(cwd: $0, args: largs, env: env) }.flatMap { ours && $0.isRunnable ? $0 : nil }
                 cache[pid] = Static(start: start, args: Proc.argsAndEnv(pid).args, path: Proc.path(pid), cwd: cwd,
-                                    origin: origin, launcher: launcher, launch: launch)
+                                    origin: origin, launcher: launcher, byApp: !byUser, launch: launch)
             }
             let s = cache[pid]!
             let name = Proc.name(pid)
@@ -116,7 +116,8 @@ actor Scanner {
                 command: Proc.pretty(s.launch?.args ?? s.args, fallback: name), kind: kind, origin: s.origin,
                 started: Date(timeIntervalSince1970: TimeInterval(start)),
                 memory: mem, cpu: cpu,
-                isDev: Kinds.isDev(path: s.path, kind: kind, origin: s.origin) && (s.origin != nil || !Proc.isApp(pid)),
+                // an unrecognised process a GUI app started is that app's helper (Chrome extension hosts etc.)
+                isDev: Kinds.isDev(path: s.path, kind: kind, origin: s.origin) && (s.origin != nil || (!Proc.isApp(pid) && !(s.byApp && kind == "Process"))),
                 launch: s.launch))
         }
         cache = cache.filter { seen.contains($0.key) }
@@ -296,8 +297,9 @@ enum Proc {
         var cur = pid
         for _ in 0..<16 {
             guard let p = parent(cur), p > 1, bsdInfo(p)?.pbi_uid == getuid() else { break }
-            if isGUIApp(p) { return (cur, false) }
+            // agents and localhostage itself first: we're a (menu bar) app too, and what Run starts is still yours
             if isAgent(p) { break }
+            if isGUIApp(p) { return (cur, false) }
             // An interactive/login shell (`-zsh`, no -c, no script) is your terminal: stop. A shell running a script
             // (`./start.sh`) or a `sh -c` from npm/yarn/make is part of the job: keep climbing, unless an agent or
             // app ran it (Claude Code's `zsh -c`, a VS Code task) - then the command it ran is what you typed.

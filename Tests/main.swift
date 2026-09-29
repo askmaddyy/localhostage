@@ -1,7 +1,11 @@
 // Self-check (binary name must start with "localhostage" so relaunched children stop their launcher search at it, like in the app):
 // swiftc Sources/Scanner.swift Tests/main.swift -o /tmp/localhostage-check && /tmp/localhostage-check
+import AppKit
 import Foundation
 setvbuf(stdout, nil, _IOLBF, 0)
+// Register as a menu bar app, exactly like localhostage, so "started by us" is tested the way the real app sees it
+_ = NSApplication.shared
+NSApp.setActivationPolicy(.accessory)
 
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lhg-check-\(getpid())")
 try FileManager.default.createDirectory(at: dir.appendingPathComponent(".git"), withIntermediateDirectories: true)
@@ -116,7 +120,8 @@ Task {
     let npmDir = dir.appendingPathComponent("npmapp")
     try! FileManager.default.createDirectory(at: npmDir, withIntermediateDirectories: true)
     try! #"{"name":"npmapp","scripts":{"dev":"node server.js"}}"#.write(to: npmDir.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
-    try! "const h=require('http');h.createServer((q,r)=>r.end('ok')).listen(48997);h.createServer().listen(48996);".write(to: npmDir.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
+    // shaped like Next.js: the listening process renames itself, so only the npm launcher above it is replayable
+    try! "process.title='next-server (v16.1.6)';const h=require('http');h.createServer((q,r)=>r.end('ok')).listen(48997);h.createServer().listen(48996);".write(to: npmDir.appendingPathComponent("server.js"), atomically: true, encoding: .utf8)
     // Real toolchains, typed into an interactive shell on a pty exactly like a terminal. Each must round-trip:
     // the app sees the typed command, Kill frees the port, Run brings it back. No guessing allowed.
     let rust = dir.appendingPathComponent("rustapp")

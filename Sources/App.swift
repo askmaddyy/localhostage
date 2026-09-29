@@ -100,12 +100,16 @@ final class Store {
         }
         remember(fresh)
         for (key, since) in starting {
-            if fresh.contains(where: { $0.launch?.key == key }) {
+            let r = recents.first { $0.id == key }
+            // up = the same launch is running, or its port is held by something running from its folder
+            let up = fresh.contains { l in
+                l.launch?.key == key || (r.map { l.ports.contains($0.port) && l.launch?.cwd == $0.launch.cwd } ?? false)
+            }
+            if up {
                 starting[key] = nil
-            } else if Date().timeIntervalSince(since) > 25, let r = recents.first(where: { $0.id == key }) {
+            } else if Date().timeIntervalSince(since) > 25, let r {
                 starting[key] = nil
-                say("\(r.project) didn't come up. Opening its log.")
-                NSWorkspace.shared.open(Self.logURL(r))
+                say("\(r.project) didn't open :\(r.port) in 25s. Right-click it for the log.")
             }
         }
     }
@@ -163,8 +167,7 @@ final class Store {
     /// A crash before the port comes up is reported now, not after the 25s timeout.
     private func exited(_ r: Recent, _ code: Int32) {
         guard code != 0, starting.removeValue(forKey: r.id) != nil else { return }
-        say("\(r.project) exited (code \(code)). Opening its log.")
-        NSWorkspace.shared.open(Self.logURL(r))
+        say("\(r.project) exited (code \(code)). Right-click it for the log.")
     }
 
     func forget(_ r: Recent) {
