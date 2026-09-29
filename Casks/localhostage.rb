@@ -1,6 +1,6 @@
 cask "localhostage" do
-  version "1.0.0"
-  sha256 "6a8d75f0e5f88428d8c59afdd0fd0beb62d9906eac9732ea60b013e34b8857d6"
+  version "1.0.1"
+  sha256 "32f7e7778996e6417747a102766db1e5e86dd7819bb6683e7c4dd5426bcb25ef"
 
   url "https://github.com/askmaddyy/localhostage/releases/download/v#{version}/localhostage.dmg"
   name "localhostage"
