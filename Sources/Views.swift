@@ -52,7 +52,7 @@ struct Panel: View {
                             switch e {
                             case .live(let l, _): LiveRow(l: l)
                             case .empty: EmptyState()
-                            case .header: SectionHeader(title: "Recently freed")
+                            case .header: SectionHeader(title: "Recently stopped")
                             case .recent(let r): RecentRow(r: r)
                             }
                         }
@@ -107,14 +107,14 @@ private struct Header: View {
             Spacer()
             if store.freeable.count > 1 {
                 Button { store.freeAll() } label: {
-                    Label("Free all", systemImage: "lock.open.fill")
+                    Text("Kill all")
                         .font(.system(size: 11.5, weight: .semibold))
                         .padding(.horizontal, 11).frame(height: 28)
                 }
                 .buttonStyle(Press())
                 .glass(.red.opacity(0.55), interactive: true, in: Capsule())
                 .foregroundStyle(.white)
-                .help("Free every server except databases and Docker")
+                .help("Stop every server except databases and Docker")
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
             Menu {
@@ -124,11 +124,13 @@ private struct Header: View {
                 Divider()
                 Button("Quit localhostage") { NSApp.terminate(nil) }.keyboardShortcut("q")
             } label: {
-                Image(systemName: "ellipsis").font(.system(size: 12, weight: .semibold)).frame(width: 28, height: 28)
+                Image(systemName: "gearshape.fill").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28).contentShape(Circle())
             }
             .menuStyle(.button).menuIndicator(.hidden).buttonStyle(.plain)
             .glass(interactive: true, in: Circle())
-            .accessibilityLabel("Options")
+            .help("Settings")
+            .accessibilityLabel("Settings")
         }
         .animation(droplet, value: store.freeable.count > 1)
     }
@@ -160,7 +162,6 @@ private struct LiveRow: View {
     let l: Listener
     @State private var hover = false
     @State private var armed = false
-    @State private var unlocked = false
     @Namespace private var ns
 
     var body: some View {
@@ -184,10 +185,11 @@ private struct LiveRow: View {
                 HStack(spacing: 6) {
                     Text(verbatim: ":\(l.ports[0])")
                         .font(.system(size: 13, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .fixedSize()
                         .padding(.horizontal, 10).frame(height: 28)
                         .glass(Kind.color(l.kind).opacity(0.22), in: Capsule())
                         .glassID("port", ns)
-                    if (hover || armed) && !dying {
+                    if hover && !dying {
                         Button { NSWorkspace.shared.open(URL(string: "http://localhost:\(l.ports[0])")!) } label: {
                             Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .bold)).frame(width: 28, height: 28)
                         }
@@ -196,29 +198,23 @@ private struct LiveRow: View {
                         .glassID("open", ns)
                         .help("Open localhost:\(l.ports[0])")
                         .accessibilityLabel("Open in browser")
-
-                        Button(action: tapFree) {
-                            Group {
-                                if armed {
-                                    Text("Sure?").font(.system(size: 11, weight: .bold)).fixedSize().padding(.horizontal, 10)
-                                } else {
-                                    Image(systemName: unlocked ? "lock.open.fill" : "lock.fill")
-                                        .font(.system(size: 11, weight: .bold))
-                                        .contentTransition(.symbolEffect(.replace))
-                                        .frame(width: 28)
-                                }
-                            }
-                            .frame(height: 28)
+                    }
+                    if !dying {
+                        Button(action: tapKill) {
+                            Text(armed ? "Sure?" : "Kill")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .fixedSize()
+                                .contentTransition(.interpolate)
+                                .padding(.horizontal, 11).frame(height: 28)
                         }
                         .buttonStyle(Press())
-                        .foregroundStyle(.white)
-                        .glass(.red.opacity(armed ? 0.9 : 0.6), interactive: true, in: Capsule())
-                        .glassID("free", ns)
-                        .help(l.isProtected ? "\(l.kind) is protected: click twice to free it" : "Free this port (stops the server and everything it started)")
-                        .accessibilityLabel("Free port \(l.ports[0])")
-                    }
-                    if dying {
-                        ProgressView().controlSize(.small).frame(width: 28, height: 28).glassID("free", ns)
+                        .foregroundStyle(hover || armed ? .white : Color.red)
+                        .glass(hover || armed ? .red.opacity(armed ? 0.95 : 0.75) : .red.opacity(0.12), interactive: true, in: Capsule())
+                        .glassID("kill", ns)
+                        .help(l.isProtected ? "\(l.kind) is protected: click twice to stop it" : "Stop this server and free :\(l.ports[0])")
+                        .accessibilityLabel("Kill port \(l.ports[0])")
+                    } else {
+                        ProgressView().controlSize(.small).frame(width: 40, height: 28).glassID("kill", ns)
                     }
                 }
             }
@@ -246,14 +242,13 @@ private struct LiveRow: View {
         return parts.joined(separator: "  ·  ")
     }
 
-    private func tapFree() {
+    private func tapKill() {
         if l.isProtected && !armed {
             withAnimation(droplet) { armed = true }
             Task { try? await Task.sleep(for: .seconds(3)); withAnimation(droplet) { armed = false } }
             return
         }
         armed = false
-        withAnimation(.snappy(duration: 0.2)) { unlocked = true }
         store.free(l)
     }
 
@@ -401,7 +396,7 @@ struct Press: ButtonStyle {
 private struct GlassGroup<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
-        if #available(macOS 26, *) { GlassEffectContainer(spacing: 10) { content } } else { content }
+        if #available(macOS 26, *) { GlassEffectContainer(spacing: 3) { content } } else { content }
     }
 }
 
